@@ -18,7 +18,7 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp_types import ToolAnnotations
 from pydantic import Field
 
-from . import __version__, dictparse, fields, logs, mesh, plotting, postproc
+from . import __version__, dictparse, fields, gpu, logs, mesh, plotting, postproc
 from .config import Settings
 from .errors import FoamError
 from .foam import FoamEnv, fatal_error, strip_banner
@@ -41,6 +41,9 @@ OpenFOAM CFD server. Typical workflow:
    poll solver_progress(case) / job_status(job_id). stop_job(mode="write") ends a run cleanly.
 7. Inspect: render (field images), field_stats, post_process (function objects, e.g. forceCoeffs, yPlus),
    list_postprocessing / read_postprocessing (tables, optional plots).
+8. Videos: animate(case) renders every saved time step of a transient run into an MP4/GIF.
+   gpu_simulate runs a fast transient GPU wind tunnel (lattice Boltzmann) on any STL and returns
+   vortex/velocity videos - for visualisation; use OpenFOAM for engineering-grade numbers.
 Case arguments are names inside the workspace (or absolute paths inside allowed roots).
 """
 
@@ -62,6 +65,7 @@ class App:
         self._lock = threading.Lock()
         self._paraview: ParaView | None = None
         self._tutorials: list[dict] | None = None
+        self.gpu = gpu.GpuEngine(settings.gpu_python)
 
     @property
     def foam(self) -> FoamEnv:
@@ -257,7 +261,12 @@ def _job_report(job: Job, tail_lines: int = 20) -> dict:
     a = _app()
     rep = job.public()
     log = Path(job.log)
-    if log.is_file():
+    if log.is_file() and log.name == "log.gpu":
+        if (prog := gpu.last_progress(log)) is not None:
+            rep["progress"] = prog
+        if not job.running:
+            rep["log_tail"] = logs.tail(log, 6)
+    elif log.is_file():
         data = a.logs.get(log)
         if data.residuals:
             case_dir = Path(job.log).parent
@@ -276,7 +285,8 @@ def _job_report(job: Job, tail_lines: int = 20) -> dict:
                 rep["warning"] = f"The application reported: '{notice.group(0).strip()}' - it may not have done anything. See log_tail."
                 rep["log_tail"] = logs.tail(log, 15)
     if job.running:
-        rep["hint"] = f"Still running. Poll with job_status('{job.id}') or solver_progress('{job.case}')."
+        also = "" if log.name == "log.gpu" else f" or solver_progress('{job.case}')"
+        rep["hint"] = f"Still running. Poll with job_status('{job.id}'){also}."
     return rep
 
 
@@ -410,6 +420,7 @@ def foam_info() -> dict:
         info["paraview"] = {"python": a.paraview.resolve()[0], "version": a.paraview.resolve()[2]}
     except FoamError as e:
         info["paraview"] = {"error": str(e)}
+    info["gpu"] = a.gpu.info()
     return info
 
 
@@ -619,6 +630,20 @@ def list_cases() -> list[dict]:
                 "times": len(times),
                 "latest_time": times[-1] if times else None,
                 "processors": len(fields.processor_dirs(d)),
+                "running_jobs": running.get(name, []),
+            }
+        )
+    for marker in sorted(ws.glob(f"*/{gpu.MARKER}")):
+        d = marker.parent
+        name = a.name(d)
+        meta = json.loads((d / "meta.json").read_text()) if (d / "meta.json").is_file() else {}
+        out.append(
+            {
+                "case": name,
+                "engine": "gpu (XLB lattice Boltzmann)",
+                "cells": meta.get("cells"),
+                "frames": len(list((d / "frames").glob("vortex_*.png"))) if (d / "frames").is_dir() else 0,
+                "videos": sorted(p.name for p in d.glob("*.mp4")),
                 "running_jobs": running.get(name, []),
             }
         )
@@ -909,6 +934,27 @@ def write_file(
     return out
 
 
+def _resolve_source(raw: str) -> Path:
+    """A readable source file: `$FOAM_TUTORIALS/...` or a path inside the workspace/allowed roots."""
+    a = _app()
+    raw = raw.strip()
+    if m := re.match(r"^\$\{?FOAM_TUTORIALS\}?/?(.*)$", raw):
+        tut = a.foam.tutorials.resolve()
+        src, allowed = (tut / m.group(1)).resolve(), [tut]
+    else:
+        src = Path(from_windows(raw)).expanduser().resolve()
+        allowed = list(a.settings.roots)
+        try:
+            allowed.append(a.foam.tutorials.resolve())
+        except FoamError:
+            pass  # no OpenFOAM here (e.g. GPU-only use)
+    if not any(within(src, r) for r in allowed):
+        raise FoamError(f"{src} is outside the workspace, allowed roots and tutorials. Start the server with --root <dir> to read from there.")
+    if not src.exists():
+        raise FoamError(f"Source not found: {src}")
+    return src
+
+
 @tool(WRITES)
 def import_file(
     case: CaseArg,
@@ -919,20 +965,7 @@ def import_file(
     """Copy geometry (STL/OBJ), meshes or other files into a case, e.g. the surface for snappyHexMesh."""
     a = _app()
     d = a.case(case)
-    foam = a.foam
-    raw = source.strip()
-    if m := re.match(r"^\$\{?FOAM_TUTORIALS\}?/?(.*)$", raw):
-        src = (foam.tutorials / m.group(1)).resolve()
-        allowed = [foam.tutorials.resolve()]
-    else:
-        src = Path(from_windows(raw)).expanduser().resolve()
-        allowed = [*a.settings.roots, foam.tutorials.resolve()]
-    if not any(within(src, r) for r in allowed):
-        raise FoamError(
-            f"{src} is outside the workspace, allowed roots and tutorials. Start the server with --root <dir> to import from there."
-        )
-    if not src.exists():
-        raise FoamError(f"Source not found: {src}")
+    src = _resolve_source(source)
     target = case_file(d, dest)
     if dest.endswith(("/", "\\")) or target.is_dir():
         target = target / src.name
@@ -1394,3 +1427,129 @@ def render(
     meta["image"] = str(out)
     return [meta, Image(path=out)]
 
+
+# ============================================================================ GPU engine & animation
+
+FLUIDS = {
+    "air": {"rho": 1.2, "nu": 1.5e-5},
+    "water": {"rho": 998.0, "nu": 1.0e-6},
+    "mars": {"rho": 0.017, "nu": 6.5e-4},  # CO2 at ~700 Pa, ~220 K (Jezero crater)
+}
+_DIRECTIONS = {"+x": [1, 0, 0], "-x": [-1, 0, 0], "+y": [0, 1, 0], "-y": [0, -1, 0], "+z": [0, 0, 1], "-z": [0, 0, -1]}
+
+
+@tool(WRITES)
+def gpu_simulate(
+    name: Annotated[str, Field(description="New GPU case name (directory) in the workspace.")],
+    geometry: Annotated[str, Field(description="STL/OBJ of the body: a path inside the workspace or allowed roots, e.g. 'mycase/constant/geometry/car.stl'.")],
+    speed: Annotated[float, Field(description="Free-stream speed in m/s.", gt=0)] = 10.0,
+    direction: Annotated[str | list[float], Field(description="Wind direction in the geometry's coordinates: '+x', '-y', ... or a vector [dx, dy, dz].")] = "+x",
+    fluid: Annotated[str, Field(description="'air', 'water', 'mars' (CO2 atmosphere), or 'custom' with rho and nu.")] = "air",
+    rho: Annotated[float | None, Field(description="Density in kg/m3 for fluid='custom'.")] = None,
+    nu: Annotated[float | None, Field(description="Kinematic viscosity in m2/s for fluid='custom'.")] = None,
+    ground: Annotated[bool, Field(description="Put the body on a no-slip ground plane (its lowest point at the floor).")] = False,
+    view: Annotated[Literal["top", "side"], Field(description="Rendering view: 'top' looks down on the flow, 'side' looks across it.")] = "top",
+    resolution: Annotated[int | None, Field(description="Cells across the body's largest dimension. Default: as fine as free GPU memory allows.")] = None,
+    flow_throughs: Annotated[float, Field(description="Simulated time in tunnel flow-through times (1.5 gives a developed wake).", gt=0)] = 1.5,
+    frames: Annotated[int, Field(description="Number of frames rendered for the videos.", ge=2, le=2000)] = 120,
+    fps: int = 24,
+    mode: Annotated[Literal["accurate", "fast"], Field(description="accurate: D3Q27 + KBC (robust). fast: D3Q19 + Smagorinsky LES (about 2x faster).")] = "accurate",
+    max_cell_reynolds: Annotated[float, Field(description="Stability cap on u/nu in lattice units. Lower it (e.g. 60) if a run diverges; this lowers the simulated Reynolds number.", gt=0, le=200)] = 100,
+    overwrite: bool = False,
+    wait_seconds: Annotated[float | None, Field(description="How long to wait before returning (default ~45 s). The run continues as a background job.")] = None,
+) -> dict:
+    """Transient GPU wind tunnel (XLB lattice Boltzmann) around a body, rendered to frames and MP4 videos.
+
+    Made for fast, unsteady flow visualisation: vortex shedding, wakes, gusts. Forces are indicative only
+    (no-slip tunnel walls, simulated Reynolds number capped for stability); use the OpenFOAM tools for
+    engineering numbers. Poll with job_status(job_id); videos and frames land in the case directory and
+    animate() makes GIFs or re-encodes. Needs an NVIDIA GPU and the GPU extra.
+    """
+    a = _app()
+    python = a.gpu.python()
+    d = a.case(name, must_exist=False)
+    if d.exists():
+        if not overwrite:
+            raise FoamError(f"'{name}' already exists. Pass overwrite=true or choose another name.")
+        if a.jobs.running_for(a.name(d)):
+            raise FoamError(f"'{name}' has a running job; stop it first.")
+        shutil.rmtree(d)
+    src = _resolve_source(geometry)
+    if fluid == "custom":
+        if rho is None or nu is None:
+            raise FoamError("fluid='custom' needs rho and nu.")
+        props = {"rho": rho, "nu": nu}
+    elif fluid in FLUIDS:
+        props = FLUIDS[fluid]
+    else:
+        raise FoamError(f"Unknown fluid '{fluid}'. Use {sorted(FLUIDS)} or 'custom'.")
+    vec = _DIRECTIONS.get(direction) if isinstance(direction, str) else list(direction)
+    if vec is None or len(vec) != 3:
+        raise FoamError("direction must be '+x', '-x', '+y', '-y', '+z', '-z' or [dx, dy, dz].")
+    d.mkdir(parents=True)
+    geo = d / f"geometry{src.suffix.lower()}"
+    shutil.copy2(src, geo)
+    params = {
+        "case_dir": str(d), "geometry": str(geo), "speed": speed, "direction": vec, "ground": ground,
+        "view": view, "resolution": resolution, "flow_throughs": flow_throughs, "frames": frames,
+        "fps": fps, "mode": mode, "max_cell_reynolds": max_cell_reynolds, "fluid": fluid, **props,
+    }
+    (d / gpu.MARKER).write_text(json.dumps(params, indent=1))
+    runner = FoamEnv(dict(os.environ, XLA_PYTHON_CLIENT_PREALLOCATE="false"), "gpu engine")
+    job = a.jobs.start(d, a.name(d), "gpu_lbm", [python, str(gpu.WORKER), str(d / gpu.MARKER)], d / "log.gpu", runner)
+    job = _wait(job, a.settings.wait_seconds if wait_seconds is None else wait_seconds)
+    rep = _job_report(job)
+    if (d / "meta.json").is_file():
+        meta = json.loads((d / "meta.json").read_text())
+        rep["setup"] = {k: meta.get(k) for k in ("grid", "cells", "dx_m", "steps", "physical_time_s",
+                                                  "reynolds_physical", "reynolds_simulated", "blockage_ratio", "note")}
+    return rep
+
+
+@tool(WRITES)
+def animate(
+    case: CaseArg,
+    kind: Annotated[str, Field(description="GPU cases: 'vortex' (glowing vorticity) or 'slice' (velocity). OpenFOAM cases: the field to render, e.g. 'U' or 'p'.")] = "vortex",
+    format: Annotated[Literal["mp4", "gif"], Field(description="mp4 for sharing, gif for chats that do not play video.")] = "mp4",
+    fps: int = 24,
+    every: Annotated[int, Field(description="Use every n-th frame (or time directory).", ge=1)] = 1,
+    max_frames: Annotated[int, Field(description="OpenFOAM cases: render at most this many time steps (each one is a ParaView render).", ge=2)] = 60,
+    mode: Annotated[str, Field(description="OpenFOAM cases: render mode, as in render() (auto, slice, patches, contour, streamlines).")] = "auto",
+    slice_normal: Annotated[str | None, Field(description="OpenFOAM cases: slice normal, e.g. 'y'.")] = None,
+    focus: Annotated[str | None, Field(description="OpenFOAM cases: patch or group to frame.")] = None,
+    view: Annotated[str | list[float], Field(description="OpenFOAM cases: camera, as in render().")] = "auto",
+):
+    """Turn a run into a video: GPU-case frames, or one render per saved time step of a transient OpenFOAM case.
+
+    Returns the video path plus a 2x2 contact sheet of frames so you can see the motion without playing it.
+    """
+    a = _app()
+    d = a.case(case)
+    if (d / gpu.MARKER).is_file():
+        frames = sorted((d / "frames").glob(f"{kind}_*.png"))[::every]
+        if not frames:
+            raise FoamError(f"No '{kind}' frames yet. GPU cases render 'vortex' and 'slice'; check job_status.")
+    else:
+        times = [t for t in fields.time_dirs(d) if float(t) > 0][::every][:max_frames]
+        if len(times) < 2:
+            procs = fields.processor_dirs(d)
+            if procs and len([t for t in fields.time_dirs(procs[0]) if float(t) > 0]) >= 2:
+                raise FoamError("The results are still decomposed: run(case, 'reconstructPar') first, then animate.")
+            raise FoamError("Need at least two saved time steps (lower writeInterval in controlDict for a transient run).")
+        out_dir = d / "animation" / kind
+        shutil.rmtree(out_dir, ignore_errors=True)
+        out_dir.mkdir(parents=True)
+        # Fix the colour range from the last time step so colours mean the same thing in every frame.
+        last = render(a.name(d), kind, mode=mode, time=times[-1], slice_normal=slice_normal, focus=focus, view=view)
+        rng = (last[0].get("color") or {}).get("range")
+        frames = []
+        for i, t in enumerate(times):
+            meta = render(a.name(d), kind, mode=mode, time=t, slice_normal=slice_normal, focus=focus, view=view, range=rng)[0]
+            target = out_dir / f"frame_{i:05d}.png"
+            shutil.move(meta["image"], target)
+            frames.append(target)
+    target = d / f"{kind}.{format}"
+    gpu.encode(frames, target, fps)
+    rep = {"case": a.name(d), "video": str(target), "frames": len(frames), "fps": fps,
+           "duration_s": round(len(frames) / fps, 2), "bytes": target.stat().st_size}
+    return [rep, Image(data=gpu.contact_sheet(frames), format="png")]

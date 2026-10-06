@@ -41,8 +41,8 @@ def resolve_case(settings: Settings, case: str, must_exist: bool = True) -> Path
     if must_exist:
         if not path.is_dir():
             raise FoamError(f"Case not found: {path}. Use list_cases or create_case.")
-        if not (path / "system").is_dir():
-            raise FoamError(f"{path} is not an OpenFOAM case (no system/ directory).")
+        if not (path / "system").is_dir() and not (path / "gpu.json").is_file():
+            raise FoamError(f"{path} is not an OpenFOAM case (no system/ directory) or a GPU case.")
     return path
 
 

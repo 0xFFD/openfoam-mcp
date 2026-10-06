@@ -95,16 +95,35 @@ claude mcp add --scope user openfoam -- wsl.exe -d Ubuntu-22.04 --exec /home/me/
 | Running | `run` (any OpenFOAM app or `Allrun`, `np` for MPI), `job_status`, `stop_job`, `read_log`, `solver_progress` (+ residual plot) |
 | Mesh | `check_mesh` (structured stats, failed checks, advice) |
 | Results | `post_process`, `list_postprocessing`, `read_postprocessing` (+ plot), `field_stats`, `render` |
+| Videos & GPU | `animate` (MP4/GIF from any transient run), `gpu_simulate` (GPU wind tunnel on any STL, see below) |
 
 Typical loop the agent follows: `list_tutorials → create_case → case_summary → set_dict → run blockMesh/snappyHexMesh → check_mesh → run solver → solver_progress → render / post_process`.
 
 ### `render` modes
 `auto` (whole 2-D domain, mid-plane slice in 3-D) · `slice` · `surface` · `patches` (e.g. pressure on a body) · `mesh` · `contour` (iso-surface, e.g. Q-criterion after `post_process("Q")`) · `streamlines` — with camera presets, `focus` on a patch or group, zoom, component, colour range and colormap.
 
+### GPU wind tunnel (optional)
+
+`gpu_simulate` runs a transient lattice Boltzmann simulation ([XLB](https://github.com/Autodesk/XLB), Apache-2.0) on an NVIDIA GPU around any STL/OBJ, renders every frame on the GPU (a glowing vorticity "smoke" view and a velocity slice) and encodes MP4 videos. It is built for what OpenFOAM on a CPU is slow at: watching unsteady wakes and vortex shedding, in minutes.
+
+```bash
+openfoam-mcp gpu-setup      # one-time: dedicated env with XLB, JAX (CUDA 12) and NVIDIA Warp
+```
+
+Then ask your agent something like *"put drone.stl in a 15 m/s wind on the GPU and make a video"*. The grid is sized automatically to the free GPU memory (about 18 M cells on a 6 GB card), and `animate` turns frames into MP4 or GIF.
+
+Honest limits:
+- **Forces are indicative.** The force *calculation* is verified: on the same simulation it agrees within 2-3 % with an independent control-volume momentum balance. The simulated *flow* is the approximation: the tunnel walls are no-slip (XLB 0.3.1's far-field conditions were not stable), so blockage raises drag (every run reports its `blockage_ratio`), and thin parts such as rotor blades become blunter on the grid. For NASA's Ingenuity the GPU run gave about 21 N of drag where OpenFOAM gave 4.8 N.
+- **The simulated Reynolds number is capped.** Stability needs a cell Reynolds number of about 100 or less, so a drone at Re 10^5-10^6 is simulated at Re of a few thousand to ten thousand (reported as `reynolds_simulated` next to `reynolds_physical`). Wakes look right qualitatively; use the OpenFOAM tools for engineering numbers.
+- NVIDIA only (CUDA on Linux or WSL2). `gpu-setup` pins Warp 1.8.1 and JAX 0.10.2: newer Warp versions silently mis-voxelize STL bodies with XLB 0.3.1.
+- The stability cap (`max_cell_reynolds`, default 100) comes from tests on spheres, boxes and Ingenuity; lower it if a run diverges.
+- `mode="fast"` (D3Q19 + Smagorinsky) is about 2x faster; both modes, `ground=True` and arbitrary wind directions are covered by the GPU tests. Rendering a time-dependent OpenFOAM case with `animate` costs about 3-4 s per frame (one ParaView render each).
+
 ### Tested with
 
 - OpenFOAM 14 (openfoam.org) on Ubuntu 22.04 / WSL2: pitzDaily (2-D, serial and parallel) and motorBike (3-D, `snappyHexMesh` and solver on 6 MPI ranks, 355 k cells).
 - Clients: Claude Code (agent session through `wsl.exe`) and Codex CLI (configuration and health check).
+- GPU engine: NVIDIA RTX 2060 (6 GB) under WSL2: sphere, floor-mounted bar with wind from -y, and Ingenuity (18.9 M cells, 18 min).
 - Python 3.10 and 3.13.
 - Not yet verified on real hardware: macOS (OpenFOAM.app), Docker/Podman, openfoam.com (ESI) builds — reports welcome.
 
@@ -120,6 +139,7 @@ Typical loop the agent follows: `list_tutorials → create_case → case_summary
 | `--container NAME` | `OPENFOAM_MCP_CONTAINER` | — use an existing container (must mount the workspace at the same path) |
 | `--container-cli EXE` | `OPENFOAM_MCP_CONTAINER_CLI` | `docker`, else `podman` |
 | `--paraview-python EXE` | `OPENFOAM_MCP_PARAVIEW_PYTHON` | auto-detected (`pvpython`, system `python3`) |
+| `--gpu-python EXE` | `OPENFOAM_MCP_GPU_PYTHON` | the `gpu-setup` environment, else the server's Python |
 | `--no-scripts` | `OPENFOAM_MCP_NO_SCRIPTS` | scripts allowed |
 | `--wait-seconds N` | `OPENFOAM_MCP_WAIT_SECONDS` | 45 — how long a tool waits before returning a job id |
 | `serve --transport http --port 8765` | | stdio |
@@ -143,7 +163,7 @@ uv run openfoam-mcp serve --workspace /tmp/ws   # or point an MCP inspector at i
 
 CI runs the unit tests on Linux and macOS. Container mode is tested with a stand-in `docker` executable (see `tests/test_backends.py`) that runs the real pitzDaily case through the container code path; reports from real Docker/Podman and OpenFOAM.app setups are very welcome.
 
-Project layout: `server.py` (tool definitions) · `foam.py` (installation discovery; native, launcher and container runners; app allow-list) · `jobs.py` (persistent background jobs) · `logs.py` (incremental solver-log parser and convergence verdicts) · `mesh.py` · `fields.py` · `postproc.py` · `dictparse.py` (fast read-only dictionary parser) · `render.py` + `_pv_render.py` (ParaView) · `install.py` (client configuration).
+Project layout: `server.py` (tool definitions) · `foam.py` (installation discovery; native, launcher and container runners; app allow-list) · `jobs.py` (persistent background jobs) · `logs.py` (incremental solver-log parser and convergence verdicts) · `mesh.py` · `fields.py` · `postproc.py` · `dictparse.py` (fast read-only dictionary parser) · `render.py` + `_pv_render.py` (ParaView) · `gpu.py` + `_gpu_lbm.py` (GPU engine, video encoding) · `install.py` (client configuration).
 
 ## License
 

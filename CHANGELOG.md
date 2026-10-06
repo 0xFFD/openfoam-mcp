@@ -12,6 +12,15 @@ All notable changes to this project are documented here. The format follows
   successfully (e.g. `reconstructParMesh` in openfoam.org 12+), instead of reporting plain success.
 
 ### Added
+- `gpu_simulate`: transient GPU wind tunnel (XLB lattice Boltzmann on NVIDIA GPUs) around any STL/OBJ,
+  with on-GPU rendering of a vorticity "smoke" view and a velocity slice, MP4 videos, indicative forces,
+  and automatic grid sizing to free GPU memory. The force calculation agrees within 2-3 % with an
+  independent control-volume momentum balance on the same simulation; the forces themselves are indicative
+  (no-slip tunnel walls, capped simulated Reynolds number).
+- `animate`: MP4/GIF from GPU-case frames or from every saved time step of a transient OpenFOAM case,
+  returned with a contact sheet so agents can see the motion.
+- `openfoam-mcp gpu-setup`: builds the GPU environment with versions validated together (XLB 0.3.1,
+  Warp 1.8.1, JAX CUDA 12); `doctor` and `foam_info` report GPU status.
 - `render(view=[dx, dy, dz])` places the camera along any direction, e.g. to look at the upstream side.
 
 ## [0.1.0] - 2026-10-06

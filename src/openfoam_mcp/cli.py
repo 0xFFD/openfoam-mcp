@@ -21,6 +21,7 @@ def _server_options(p: argparse.ArgumentParser) -> None:
     g.add_argument("--container-image", help="Run OpenFOAM in a container started from this image.")
     g.add_argument("--container-cli", help="docker or podman executable (default: auto-detect).")
     g.add_argument("--paraview-python", help="Python/pvpython able to `import paraview.simple`.")
+    g.add_argument("--gpu-python", help="Python with XLB, JAX (CUDA) and Warp for the GPU engine.")
     g.add_argument("--no-scripts", action="store_true", help="Forbid running case scripts such as Allrun.")
     g.add_argument("--wait-seconds", type=float, help="Default seconds tools wait for a job (default 45).")
 
@@ -38,6 +39,8 @@ def _settings(ns: argparse.Namespace) -> Settings:
             setattr(s, key, getattr(ns, key))
     if ns.paraview_python:
         s.paraview_python = ns.paraview_python
+    if ns.gpu_python:
+        s.gpu_python = ns.gpu_python
     if ns.no_scripts:
         s.allow_scripts = False
     if ns.wait_seconds is not None:
@@ -59,6 +62,8 @@ def _forward(ns: argparse.Namespace) -> list[str]:
             out += ["--" + key.replace("_", "-"), getattr(ns, key)]
     if ns.paraview_python:
         out += ["--paraview-python", ns.paraview_python]
+    if ns.gpu_python:
+        out += ["--gpu-python", ns.gpu_python]
     if ns.no_scripts:
         out.append("--no-scripts")
     if ns.wait_seconds is not None:
@@ -113,6 +118,14 @@ def cmd_doctor(ns: argparse.Namespace) -> int:
     except FoamError as e:
         ok = False
         line("FAIL", "OpenFOAM", str(e))
+    from .gpu import GpuEngine
+
+    gi = GpuEngine(s.gpu_python).info()
+    devices = ", ".join(f"{d['name']} ({d['memory_total_mb']} MB)" for d in gi["devices"]) or "no NVIDIA GPU visible"
+    if "unavailable" in gi:
+        line("info", "GPU engine", f"{devices}; not available: {gi['unavailable'][:200]}")
+    else:
+        line("ok", "GPU engine", f"{devices}; XLB {gi['xlb']}, Warp {gi['warp']} via {gi['python']}")
     try:
         s.workspace.mkdir(parents=True, exist_ok=True)
         probe = s.workspace / ".write-test"
@@ -131,6 +144,31 @@ def cmd_install(ns: argparse.Namespace, remove: bool = False) -> int:
 
     clients = [c.strip() for c in ns.client.split(",")] if ns.client else None
     return run_install(clients, _forward(ns), ns.dry_run, remove, ns.force)
+
+
+def cmd_gpu_setup(ns: argparse.Namespace) -> int:
+    from .errors import FoamError
+    from .gpu import DEFAULT_ENV, GpuEngine, nvidia_smi, setup_env
+
+    devices = nvidia_smi()
+    if not devices:
+        print("No NVIDIA GPU visible (nvidia-smi). The GPU engine needs CUDA on Linux or WSL2.")
+        return 1
+    print("GPU:", ", ".join(f"{d['name']} ({d['memory_total_mb']} MB)" for d in devices))
+    env = Path(ns.dir).expanduser() if ns.dir else DEFAULT_ENV
+    try:
+        py = setup_env(env, ns.python)
+        info = GpuEngine(str(py)).info()
+    except FoamError as e:
+        print(f"GPU setup failed: {e}")
+        return 1
+    if "unavailable" in info:
+        print("Installed, but the probe failed:", info["unavailable"])
+        return 1
+    print(f"GPU engine ready: XLB {info['xlb']}, Warp {info['warp']} at {py}")
+    if ns.dir:
+        print(f"Start the server with --gpu-python {py} (or re-run `openfoam-mcp install --gpu-python {py}`).")
+    return 0
 
 
 def cmd_config(ns: argparse.Namespace) -> int:
@@ -161,6 +199,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--dry-run", action="store_true", help="Print what would be written.")
         p.add_argument("--force", action="store_true", help="Configure named clients even if not detected.")
 
+    p = sub.add_parser("gpu-setup", help="Create the GPU engine environment (XLB + JAX CUDA + Warp).")
+    p.add_argument("--dir", help="Environment directory (default ~/.local/share/openfoam-mcp/gpu-env).")
+    p.add_argument("--python", default="3.11", help="Python version for the environment (3.11+).")
+
     p = sub.add_parser("config", help="Print config snippets for every client.")
     _server_options(p)
     p.add_argument("--client")
@@ -180,6 +222,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_install(ns, remove=True)
     if ns.command == "config":
         return cmd_config(ns)
+    if ns.command == "gpu-setup":
+        return cmd_gpu_setup(ns)
     parser.print_help()
     return 2
 

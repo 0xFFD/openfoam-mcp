@@ -20,6 +20,9 @@ dependencies = [
     "numpy>=1.22",
     "matplotlib>=3.5",
     "tomlkit>=0.12",
+    "imageio>=2.30",
+    "imageio-ffmpeg>=0.5",
+    "pillow>=9",
 ]
 
 [project.urls]

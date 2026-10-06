@@ -24,6 +24,8 @@ class Settings:
     container_cli: str | None = None  # docker or podman; auto-detected when None
     # Interpreter able to `import paraview.simple`; auto-detected when None.
     paraview_python: str | None = None
+    # Interpreter with XLB, JAX (CUDA) and Warp for the GPU engine; the server's own Python when None.
+    gpu_python: str | None = None
     # Whether case-local scripts (Allrun, Allclean, ...) may be executed.
     allow_scripts: bool = True
     # Default seconds a tool waits for a job before handing back a job id.
@@ -42,6 +44,7 @@ class Settings:
         s.container_image = os.environ.get("OPENFOAM_MCP_CONTAINER_IMAGE") or None
         s.container_cli = os.environ.get("OPENFOAM_MCP_CONTAINER_CLI") or None
         s.paraview_python = os.environ.get("OPENFOAM_MCP_PARAVIEW_PYTHON") or None
+        s.gpu_python = os.environ.get("OPENFOAM_MCP_GPU_PYTHON") or None
         if os.environ.get("OPENFOAM_MCP_NO_SCRIPTS"):
             s.allow_scripts = False
         if v := os.environ.get("OPENFOAM_MCP_WAIT_SECONDS"):

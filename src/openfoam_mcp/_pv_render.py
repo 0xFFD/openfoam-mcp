@@ -290,6 +290,10 @@ def main():
 
     # ---------------- camera ----------------
     vdir = p.get("view", "auto")
+    # A direction vector [dx, dy, dz] places the camera along it (perspective), like "iso".
+    cam_dir = [float(v) for v in vdir] if isinstance(vdir, list) else [1.0, -1.0, 1.0]
+    if isinstance(vdir, list):
+        vdir = "iso"
     if vdir == "auto":
         if mode == "slice":
             nrm = result["slice"]["normal"]
@@ -304,8 +308,9 @@ def main():
     ext, center = vext, vcenter
     dist = 3 * (max(ext) or big)
     if vdir == "iso":
-        d = (1.25 if focused else 3.0) * (max(ext) or big)
-        view.CameraPosition = [center[0] + d, center[1] - d, center[2] + d]
+        norm = sum(c * c for c in cam_dir) ** 0.5 or 1.0
+        d = (1.25 if focused else 3.0) * (max(ext) or big) * 3 ** 0.5
+        view.CameraPosition = [center[i] + d * cam_dir[i] / norm for i in range(3)]
         view.CameraViewUp = [0, 0, 1]
         view.CameraFocalPoint = center
         view.CameraParallelProjection = 0
@@ -335,7 +340,7 @@ def main():
             view.CameraParallelScale = half / float(p["zoom"])
     if p.get("zoom") and vdir == "iso":
         cam.Dolly(float(p["zoom"]))
-    result["view"] = vdir
+    result["view"] = vdir if vdir != "iso" else {"iso": cam_dir}
 
     if p.get("stats_only"):
         emit(result)

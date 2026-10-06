@@ -267,6 +267,14 @@ def _job_report(job: Job, tail_lines: int = 20) -> dict:
             if err and "progress" not in rep:
                 rep["error"] = err
             rep["log_tail"] = logs.tail(log, 6 if err else tail_lines)
+        if not job.running and job.returncode == 0:
+            # Some utilities are kept as stubs that only print a notice and exit successfully
+            # (e.g. reconstructParMesh in openfoam.org 12+), so a zero exit code is not proof of work done.
+            notice = re.search(r"^.*(?:has been superseded|has been replaced|is deprecated|no longer supported).*$",
+                               logs.tail(log, 40), re.M | re.I)
+            if notice:
+                rep["warning"] = f"The application reported: '{notice.group(0).strip()}' - it may not have done anything. See log_tail."
+                rep["log_tail"] = logs.tail(log, 15)
     if job.running:
         rep["hint"] = f"Still running. Poll with job_status('{job.id}') or solver_progress('{job.case}')."
     return rep
@@ -713,18 +721,43 @@ def case_summary(
     return out
 
 
+def _unreconstructed(d: Path, proc0: Path) -> str | None:
+    """Describe data in a processor directory that has no reconstructed counterpart, if any."""
+
+    def faces(mesh_dir: Path) -> Path | None:
+        return next((p for p in (mesh_dir / "faces", mesh_dir / "faces.gz") if p.is_file()), None)
+
+    pmesh = faces(proc0 / "constant" / "polyMesh")
+    cmesh = faces(d / "constant" / "polyMesh")
+    if pmesh and (cmesh is None or cmesh.stat().st_mtime < pmesh.stat().st_mtime - 1):
+        return "a newer mesh (e.g. from parallel snappyHexMesh)"
+    missing = sorted(set(fields.time_dirs(proc0)[1:]) - set(fields.time_dirs(d)), key=float)
+    if missing:
+        return f"results for times {missing[:5]}{'...' if len(missing) > 5 else ''}"
+    return None
+
+
 @tool(DESTRUCTIVE)
 def clean_case(
     case: CaseArg,
     keep_mesh: Annotated[bool, Field(description="Keep constant/polyMesh. Mesh removal is refused when the case cannot regenerate it.")] = True,
     keep_logs: bool = False,
     keep_processor: Annotated[bool, Field(description="Keep processor* (decomposed) directories.")] = False,
+    discard_processor_data: Annotated[bool, Field(description="Allow deleting processor* dirs even when they hold a mesh or results that were never reconstructed.")] = False,
 ) -> dict:
     """Remove results: time directories after the first, postProcessing, logs, processor dirs and optionally the mesh."""
     a = _app()
     d = a.case(case)
     if a.jobs.running_for(a.name(d)):
         raise FoamError("Case has running jobs; stop them first.")
+    procs = fields.processor_dirs(d)
+    if procs and not keep_processor and not discard_processor_data:
+        if problem := _unreconstructed(d, procs[0]):
+            raise FoamError(
+                f"processor0 holds {problem} that only exists in the decomposed case; deleting it would lose work. "
+                "Run reconstructPar first (with -constant for a mesh made in parallel), keep_processor=true, "
+                "or pass discard_processor_data=true to delete anyway."
+            )
     removed = []
     times = fields.time_dirs(d)
     for t in times[1:]:
@@ -1302,7 +1335,7 @@ def render(
     slice_normal: Annotated[list[float] | str | None, Field(description="Slice normal, e.g. 'y' or [0,1,0].")] = None,
     slice_origin: Annotated[list[float] | None, Field(description="Slice origin (default: domain centre).")] = None,
     patches: Annotated[list[str] | None, Field(description="Patch/group names for mode='patches'.")] = None,
-    view: Annotated[str, Field(description="Camera: 'auto', 'iso', '+x', '-x', '+y', '-y', '+z', '-z' (camera on that side, looking back).")] = "auto",
+    view: Annotated[str | list[float], Field(description="Camera: 'auto', 'iso', '+x', '-x', '+y', '-y', '+z', '-z' (camera on that side, looking back), or a direction [dx, dy, dz] from the target to the camera, e.g. [-1, -1, 0.8] to look at the upstream side.")] = "auto",
     focus: Annotated[str | None, Field(description="Patch or group to frame (e.g. 'motorBikeGroup', 'wall'); slices pass through it by default.")] = None,
     zoom: Annotated[float | None, Field(description="Zoom factor >1 to magnify (centre of domain).")] = None,
     range: Annotated[list[float] | None, Field(description="[min, max] colour range.")] = None,

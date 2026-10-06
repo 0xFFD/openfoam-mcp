@@ -75,6 +75,29 @@ def test_app_allow_list(tmp_path):
         foam.resolve_app("Allrun", case, allow_scripts=False)
 
 
+def test_clean_case_protects_unreconstructed_processor_data(tmp_path):
+    """A mesh made by parallel snappyHexMesh lives only in processor*/ until reconstructed."""
+    import os
+
+    from openfoam_mcp import server as S
+
+    ws = tmp_path / "ws"
+    case = ws / "c"
+    (case / "system").mkdir(parents=True)
+    (case / "constant" / "polyMesh").mkdir(parents=True)
+    (case / "constant" / "polyMesh" / "faces").write_text("background mesh")
+    pm = case / "processor0" / "constant" / "polyMesh"
+    pm.mkdir(parents=True)
+    (pm / "faces").write_text("snapped mesh")
+    os.utime(case / "constant" / "polyMesh" / "faces", (1_000_000, 1_000_000))
+    S.configure(Settings(workspace=ws))
+    with pytest.raises(FoamError, match="newer mesh"):
+        S.clean_case("c")
+    assert (case / "processor0").is_dir()
+    assert S.clean_case("c", keep_processor=True)["case"] == "c"
+    assert "processor0" in S.clean_case("c", discard_processor_data=True)["removed"]
+
+
 def test_flavor_detection(tmp_path):
     foam = _fake_foam(tmp_path)
     assert foam.flavor == "org" and foam.uses_foam_run and foam.post_process_app == "foamPostProcess"

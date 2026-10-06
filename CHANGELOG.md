@@ -3,6 +3,17 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- `clean_case` no longer deletes `processor*` directories that hold a mesh or results that were never
+  reconstructed (e.g. after parallel `snappyHexMesh`); pass `discard_processor_data=true` to override.
+- Job reports warn when an application only prints a "superseded" or "deprecated" notice and exits
+  successfully (e.g. `reconstructParMesh` in openfoam.org 12+), instead of reporting plain success.
+
+### Added
+- `render(view=[dx, dy, dz])` places the camera along any direction, e.g. to look at the upstream side.
+
 ## [0.1.0] - 2026-10-06
 
 First public release.

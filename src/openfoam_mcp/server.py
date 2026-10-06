@@ -118,6 +118,7 @@ mcp = MCPServer(
     title="OpenFOAM",
     version=__version__,
     instructions=INSTRUCTIONS,
+    website_url="https://github.com/0xFFD/openfoam-mcp",
 )
 
 

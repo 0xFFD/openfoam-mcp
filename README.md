@@ -6,9 +6,9 @@ The motorBike tutorial, driven entirely through the server's tools: `create_case
 
 | Surface pressure (`mode="patches"`) | Wake slice (`focus="motorBikeGroup"`) |
 |---|---|
-| ![surface pressure](docs/images/motorbike-surface-pressure.png) | ![velocity slice](docs/images/motorbike-velocity-slice.png) |
+| ![surface pressure](https://raw.githubusercontent.com/0xFFD/openfoam-mcp/main/docs/images/motorbike-surface-pressure.png) | ![velocity slice](https://raw.githubusercontent.com/0xFFD/openfoam-mcp/main/docs/images/motorbike-velocity-slice.png) |
 | **Drag/lift history** (`read_postprocessing(plot=True)`): Cd = 0.4007 ± 0.0003 over the last 10 % | **pitzDaily recirculation** (`mode="streamlines"`) |
-| ![force coefficients](docs/images/motorbike-force-coefficients.png) | ![streamlines](docs/images/pitzdaily-streamlines.png) |
+| ![force coefficients](https://raw.githubusercontent.com/0xFFD/openfoam-mcp/main/docs/images/motorbike-force-coefficients.png) | ![streamlines](https://raw.githubusercontent.com/0xFFD/openfoam-mcp/main/docs/images/pitzdaily-streamlines.png) |
 
 ## Why another OpenFOAM MCP?
 
@@ -33,7 +33,7 @@ Existing servers wrap a handful of hard-coded scenarios. This one exposes **gene
 Requirements: Python ≥ 3.10 and OpenFOAM reachable in one of the ways below. Optional: ParaView with Python for images, OpenMPI for parallel runs.
 
 ```bash
-uv tool install git+https://github.com/OWNER/openfoam-mcp     # or: pipx install git+https://…
+uv tool install git+https://github.com/0xFFD/openfoam-mcp     # or: pipx install git+https://…
 openfoam-mcp doctor        # checks OpenFOAM, MPI, ParaView, workspace
 openfoam-mcp install       # registers the server with every MCP client it finds
 ```
@@ -134,7 +134,7 @@ Typical loop the agent follows: `list_tutorials → create_case → case_summary
 ## Development
 
 ```bash
-git clone https://github.com/OWNER/openfoam-mcp && cd openfoam-mcp
+git clone https://github.com/0xFFD/openfoam-mcp && cd openfoam-mcp
 uv sync
 uv run pytest            # unit tests run anywhere; integration tests run when OpenFOAM is found
 uv run ruff check src tests

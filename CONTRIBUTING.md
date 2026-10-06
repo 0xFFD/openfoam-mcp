@@ -6,7 +6,7 @@ clusters) are especially valuable — please include the output of `openfoam-mcp
 ## Development setup
 
 ```bash
-git clone https://github.com/OWNER/openfoam-mcp && cd openfoam-mcp
+git clone https://github.com/0xFFD/openfoam-mcp && cd openfoam-mcp
 uv sync                     # creates .venv with dev dependencies
 uv run pytest               # unit tests everywhere; integration tests when OpenFOAM is installed
 uv run ruff check src tests

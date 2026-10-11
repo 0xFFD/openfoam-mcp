@@ -165,6 +165,8 @@ CI runs the unit tests on Linux and macOS. Container mode is tested with a stand
 
 Project layout: `server.py` (tool definitions) · `foam.py` (installation discovery; native, launcher and container runners; app allow-list) · `jobs.py` (persistent background jobs) · `logs.py` (incremental solver-log parser and convergence verdicts) · `mesh.py` · `fields.py` · `postproc.py` · `dictparse.py` (fast read-only dictionary parser) · `render.py` + `_pv_render.py` (ParaView) · `gpu.py` + `_gpu_lbm.py` (GPU engine, video encoding) · `install.py` (client configuration).
 
+[![M8ven Verified](https://m8ven.ai/badge/mcp/0xffd/openfoam-mcp?variant=verified)](https://m8ven.ai/mcp/0xffd/openfoam-mcp?s=readme)
+
 ## License
 
 MIT. OpenFOAM is a registered trademark of OpenCFD Ltd; this project is not affiliated with or endorsed by OpenCFD or the OpenFOAM Foundation.
